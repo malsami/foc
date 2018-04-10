@@ -65,7 +65,6 @@ init(l4_kernel_info_t *info)
   l4_sched_param_t params = l4_sched_param(255);
   l4_scheduler_run_thread(L4_BASE_SCHEDULER_CAP, L4_BASE_THREAD_CAP, &params);
 
-
   Page_alloc_base::init();
 
   init_memory(info);
