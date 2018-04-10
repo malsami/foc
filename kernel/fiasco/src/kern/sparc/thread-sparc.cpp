@@ -165,11 +165,11 @@ IMPLEMENTATION [sparc]:
  */
 IMPLEMENT
 Thread::Thread(Ram_quota *q)
-: Sender(0),
-  _pager(Thread_ptr::Invalid),
-  _exc_handler(Thread_ptr::Invalid),
-  _quota(q),
-  _del_observer(0)
+  : Sender(0),
+    _pager(Thread_ptr::Invalid),
+    _exc_handler(Thread_ptr::Invalid),
+    _quota(q),
+    _del_observer(0)
 {
   assert(state(false) == 0);
 
