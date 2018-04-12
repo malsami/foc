@@ -112,6 +112,16 @@ L4_INLINE l4_msgtag_t
 l4_scheduler_info_u(l4_cap_idx_t scheduler, l4_umword_t *cpu_max,
                     l4_sched_cpu_set_t *cpus, l4_utcb_t *utcb) L4_NOTHROW;
 
+/**
+ * \brief Type of scheduler parameter
+ * \ingroup l4_scheduler_api
+ * \author Valentin Hauner
+ */
+typedef enum l4_sched_param_type_t
+{
+  Fixed_prio = 1,
+  Deadline   = 2
+} l4_sched_param_type_t;
 
 /**
  * Scheduler parameter set.
@@ -121,6 +131,7 @@ typedef struct l4_sched_param_t
 {
   l4_sched_cpu_set_t affinity; ///< CPU affinity.
   l4_umword_t        prio;     ///< Priority for scheduling.
+  l4_umword_t        deadline; ///< Deadline for scheduling (own work).
   l4_umword_t        quantum;  ///< Timeslice in micro seconds.
 } l4_sched_param_t;
 
@@ -133,6 +144,15 @@ l4_sched_param(unsigned prio,
                l4_cpu_time_t quantum L4_DEFAULT_PARAM(0)) L4_NOTHROW;
 
 /**
+ * \brief Construct scheduler parameter by type.
+ * \ingroup l4_scheduler_api
+ * \author Valentin Hauner
+ */
+L4_INLINE l4_sched_param_t
+l4_sched_param_by_type(l4_sched_param_type_t type, unsigned metric,
+		       l4_cpu_time_t quantum L4_DEFAULT_PARAM(0)) L4_NOTHROW;
+
+/**
  * \ingroup l4_scheduler_api
  * \copybrief L4::Scheduler::run_thread
  *
@@ -142,6 +162,29 @@ l4_sched_param(unsigned prio,
 L4_INLINE l4_msgtag_t
 l4_scheduler_run_thread(l4_cap_idx_t scheduler,
                         l4_cap_idx_t thread, l4_sched_param_t const *sp) L4_NOTHROW;
+
+//gmc
+/**
+ * \brief Deploy a thread on a running queue.
+ * \ingroup l4_scheduler_api
+ *
+ * \param scheduler  Scheduler object.
+ * \param thread Thread to run.
+ * \param sp Scheduling parameters.
+ *
+ * \return 0 on success, <0 error code otherwise.
+ */
+L4_INLINE l4_msgtag_t
+l4_scheduler_deploy_thread(l4_cap_idx_t scheduler,
+		int* thread) L4_NOTHROW;
+
+/**
+ * \internal
+ */
+L4_INLINE l4_msgtag_t
+l4_scheduler_deploy_thread_u(l4_cap_idx_t scheduler, int* thread, l4_utcb_t *utcb) L4_NOTHROW;
+
+
 
 /**
  * \internal
@@ -190,7 +233,17 @@ L4_INLINE int
 l4_scheduler_is_online_u(l4_cap_idx_t scheduler, l4_umword_t cpu,
                          l4_utcb_t *utcb) L4_NOTHROW;
 
+L4_INLINE l4_msgtag_t
+l4_scheduler_get_rqs(int queue, int core, l4_cap_idx_t scheduler) L4_NOTHROW;
 
+L4_INLINE l4_msgtag_t
+l4_scheduler_get_rqs_u(int queue, int core, l4_cap_idx_t scheduler, l4_utcb_t *utcb) L4_NOTHROW;
+
+L4_INLINE l4_msgtag_t
+l4_scheduler_get_dead(l4_cap_idx_t scheduler) L4_NOTHROW;
+
+L4_INLINE l4_msgtag_t
+l4_scheduler_get_dead_u(l4_cap_idx_t scheduler, l4_utcb_t *utcb) L4_NOTHROW;
 
 /**
  * Operations on the Scheduler object.
@@ -203,6 +256,9 @@ enum L4_scheduler_ops
   L4_SCHEDULER_INFO_OP       = 0UL, /**< Query infos about the scheduler */
   L4_SCHEDULER_RUN_THREAD_OP = 1UL, /**< Run a thread on this scheduler */
   L4_SCHEDULER_IDLE_TIME_OP  = 2UL, /**< Query idle time for the scheduler */
+  L4_SCHEDULER_DEPLOY_THREAD_OP  = 3UL, /**< Query idle time for the scheduler */
+  L4_GET_RQS = 4UL,
+  L4_GET_DEAD = 5UL,
 };
 
 /*************** Implementations *******************/
@@ -217,12 +273,33 @@ l4_sched_cpu_set(l4_umword_t offset, unsigned char granularity,
   return cs;
 }
 
+/* Own work */
+L4_INLINE l4_sched_param_t
+l4_sched_param_by_type(l4_sched_param_type_t type, unsigned metric, l4_cpu_time_t quantum) L4_NOTHROW
+{
+  l4_sched_param_t sp;
+  if (type == Fixed_prio)
+  {
+    sp.prio = metric;
+    sp.deadline = 0;
+  }
+  else
+  {
+    sp.prio = 0;
+    sp.deadline = metric;
+  }
+  sp.quantum  = quantum;
+  sp.affinity = l4_sched_cpu_set(0, ~0, 1);
+  return sp;
+}
+
 L4_INLINE l4_sched_param_t
 l4_sched_param(unsigned prio, l4_cpu_time_t quantum) L4_NOTHROW
 {
   l4_sched_param_t sp;
   sp.prio     = prio;
   sp.quantum  = quantum;
+  sp.deadline = 0; // Own work
   sp.affinity = l4_sched_cpu_set(0, ~0, 1);
   return sp;
 }
@@ -268,6 +345,20 @@ l4_scheduler_run_thread_u(l4_cap_idx_t scheduler, l4_cap_idx_t thread,
 }
 
 L4_INLINE l4_msgtag_t
+l4_scheduler_deploy_thread_u(l4_cap_idx_t scheduler, int* thread, l4_utcb_t *utcb) L4_NOTHROW
+{
+  l4_msg_regs_t *m = l4_utcb_mr_u(utcb);
+  m->mr[0] = L4_SCHEDULER_DEPLOY_THREAD_OP;
+  m->mr[1]=thread[0];
+  m->mr[2]=thread[1];
+  for(int i = 1; i < thread[0]+1; i++){
+	  m->mr[2*i+1] = thread[2*i];
+	  m->mr[2*i+2] = thread[2*i+1];
+  }
+  return l4_ipc_call(scheduler, utcb, l4_msgtag(L4_PROTO_SCHEDULER, (2*thread[0])+3, 1, 0), L4_IPC_NEVER);
+}
+
+L4_INLINE l4_msgtag_t
 l4_scheduler_idle_time_u(l4_cap_idx_t scheduler, l4_sched_cpu_set_t const *cpus,
                          l4_kernel_clock_t *us, l4_utcb_t *utcb) L4_NOTHROW
 {
@@ -304,6 +395,23 @@ l4_scheduler_is_online_u(l4_cap_idx_t scheduler, l4_umword_t cpu,
   return s.map & 1;
 }
 
+L4_INLINE l4_msgtag_t
+l4_scheduler_get_rqs_u(int queue, int core, l4_cap_idx_t scheduler, l4_utcb_t *utcb) L4_NOTHROW
+{
+  l4_msg_regs_t *v = l4_utcb_mr_u(utcb);
+  v->mr[0] = L4_GET_RQS;
+  v->mr[1]=queue;
+  v->mr[2]=core;
+  return l4_ipc_call(scheduler, utcb, l4_msgtag(L4_PROTO_SCHEDULER, 3, 0, 0), L4_IPC_NEVER); 
+}
+
+L4_INLINE l4_msgtag_t
+l4_scheduler_get_dead_u(l4_cap_idx_t scheduler, l4_utcb_t *utcb) L4_NOTHROW
+{
+  l4_msg_regs_t *v = l4_utcb_mr_u(utcb);
+  v->mr[0] = L4_GET_DEAD;
+  return l4_ipc_call(scheduler, utcb, l4_msgtag(L4_PROTO_SCHEDULER, 1, 0, 0), L4_IPC_NEVER); 
+}
 
 L4_INLINE l4_msgtag_t
 l4_scheduler_info(l4_cap_idx_t scheduler, l4_umword_t *cpu_max,
@@ -320,6 +428,13 @@ l4_scheduler_run_thread(l4_cap_idx_t scheduler,
 }
 
 L4_INLINE l4_msgtag_t
+l4_scheduler_deploy_thread(l4_cap_idx_t scheduler,
+		int* thread) L4_NOTHROW
+{
+  return l4_scheduler_deploy_thread_u(scheduler, thread, l4_utcb());
+}
+
+L4_INLINE l4_msgtag_t
 l4_scheduler_idle_time(l4_cap_idx_t scheduler, l4_sched_cpu_set_t const *cpus,
                        l4_kernel_clock_t *us) L4_NOTHROW
 {
@@ -330,4 +445,16 @@ L4_INLINE int
 l4_scheduler_is_online(l4_cap_idx_t scheduler, l4_umword_t cpu) L4_NOTHROW
 {
   return l4_scheduler_is_online_u(scheduler, cpu, l4_utcb());
+}
+
+L4_INLINE l4_msgtag_t
+l4_scheduler_get_rqs(int queue, int core, l4_cap_idx_t scheduler) L4_NOTHROW
+{
+  return l4_scheduler_get_rqs_u(queue, core, scheduler,  l4_utcb());
+}
+
+L4_INLINE l4_msgtag_t
+l4_scheduler_get_dead(l4_cap_idx_t scheduler) L4_NOTHROW
+{
+  return l4_scheduler_get_dead_u(scheduler,  l4_utcb());
 }
