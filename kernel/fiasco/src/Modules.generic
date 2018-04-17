@@ -9,7 +9,8 @@ INTERFACES_KERNEL	:= cpu_mask rcupdate kobject_mapdb context_base pm \
 			   dbg_page_info mapdb pic kobject_dbg koptions      \
 			   kobject_iface kobject ready_queue_wfq             \
                            obj_space_types obj_space_phys_util \
-			   ready_queue_fp obj_space ptab_base ram_quota      \
+			   ready_queue_fp ready_queue_edf		     \
+			   obj_space ptab_base ram_quota                     \
 			   ref_obj mem_space space string_buffer \
 			   vlog kmem kmem_alloc slab_cache mem_layout        \
 			   kmem_slab switch_lock kip_init   \
