@@ -14,6 +14,9 @@ public:
     Info       = 0,
     Run_thread = 1,
     Idle_time  = 2,
+    Deploy_thread = 3,
+    Get_rqs = 4,
+    Get_dead = 5,
   };
 
   static Scheduler scheduler;
@@ -52,7 +55,7 @@ Scheduler::Scheduler() : _irq(0)
 
 PRIVATE
 L4_msg_tag
-Scheduler::sys_run(L4_fpage::Rights, Syscall_frame *f, Utcb const *utcb)
+Scheduler::sys_run(L4_fpage::Rights, Syscall_frame *f, Utcb const *iutcb, Utcb *outcb)
 {
   L4_msg_tag tag = f->tag();
   Cpu_number const curr_cpu = current_cpu();
@@ -63,7 +66,7 @@ Scheduler::sys_run(L4_fpage::Rights, Syscall_frame *f, Utcb const *utcb)
   unsigned long sz = sizeof (L4_sched_param_legacy);
 
     {
-      L4_sched_param const *sched_param = reinterpret_cast<L4_sched_param const*>(&utcb->values[1]);
+      L4_sched_param const *sched_param = reinterpret_cast<L4_sched_param const*>(&iutcb->values[1]);
       if (sched_param->sched_class < 0)
         sz = sched_param->length;
 
@@ -75,13 +78,13 @@ Scheduler::sys_run(L4_fpage::Rights, Syscall_frame *f, Utcb const *utcb)
     }
 
   Ko::Rights rights;
-  Thread *thread = Ko::deref<Thread>(&tag, utcb, &rights);
+  Thread *thread = Ko::deref<Thread>(&tag, iutcb, &rights);
   if (!thread)
     return tag;
 
 
   Mword _store[sz];
-  memcpy(_store, &utcb->values[1], sz * sizeof(Mword));
+  memcpy(_store, &iutcb->values[1], sz * sizeof(Mword));
 
   L4_sched_param const *sched_param = reinterpret_cast<L4_sched_param const *>(_store);
 
@@ -96,18 +99,74 @@ Scheduler::sys_run(L4_fpage::Rights, Syscall_frame *f, Utcb const *utcb)
   else
     info.cpu = sched_param->cpus.first(Cpu::present_mask(), Config::max_num_cpus());
 
+  //start time
+  outcb->values[0] = thread->dbg_id();
+  outcb->values[1] = Timer::system_clock();
+
+  /* Own work */
+#ifdef CONFIG_SCHED_FP_EDF
+  /* edf thread */
+  if (iutcb->values[5] > 0)
+  {
+    L4_sched_param_deadline	      sched_p;
+    sched_p.sched_class     = -3;
+    /* Add deadline to arrival time */
+    sched_p.deadline 	    = (iutcb->values[5])+(outcb->values[1]);
+    thread->sched_context()->set(static_cast<L4_sched_param*>(&sched_p));
+    sched_param = reinterpret_cast<L4_sched_param const *>(&sched_p);
+    info.sp=sched_param;
+  }
+  else
+  {
+  /* fp thread */
+  if (iutcb->values[3] > 0)
+  {
+    L4_sched_param_fixed_prio	      sched_p;
+    sched_p.sched_class     = -1;
+    sched_p.prio 	    = iutcb->values[3];
+    thread->sched_context()->set(static_cast<L4_sched_param*>(&sched_p));
+    sched_param = reinterpret_cast<L4_sched_param const *>(&sched_p);
+    info.sp=sched_param;
+  }
+  else
+  {
+    info.sp = sched_param;
+  }
+  }
+#else
   info.sp = sched_param;
+#endif
+
   if (0)
     printf("CPU[%u]: run(thread=%lx, cpu=%u (%lx,%u,%u)\n",
            cxx::int_value<Cpu_number>(curr_cpu), thread->dbg_id(),
            cxx::int_value<Cpu_number>(info.cpu),
-           utcb->values[2],
+           iutcb->values[2],
            cxx::int_value<Cpu_number>(sched_param->cpus.offset()),
            cxx::int_value<Order>(sched_param->cpus.granularity()));
 
   thread->migrate(&info);
 
-  return commit_result(0);
+  return commit_result(0,2);
+}
+PRIVATE
+L4_msg_tag
+Scheduler::sys_deploy_thread(L4_fpage::Rights, Syscall_frame *f, Utcb const *utcb) //gmc
+{
+	L4_msg_tag const tag = f->tag();
+
+	Sched_context::Ready_queue &rq = Sched_context::rq.current();
+
+	int list[(int)tag.words()-1];
+	list[0]=((int)tag.words()-3)/2;
+
+	for(unsigned i = 1 ; i < tag.words()-1; i++){
+		list[i]=utcb->values[i+1];			 
+	}
+
+	rq.switch_ready_queue(&list[0]);
+
+	return commit_result(0);
 }
 
 PRIVATE
@@ -144,6 +203,41 @@ Scheduler::op_sched_info(L4_cpu_set_descr const &s, Mword *m, Mword *max_cpus)
   *m = rm;
   *max_cpus = Config::Max_num_cpus;
   return commit_result(0);
+}
+
+PRIVATE
+L4_msg_tag
+Scheduler::sys_get_rqs(L4_fpage::Rights, Syscall_frame *f, Utcb const *iutcb, Utcb *outcb)
+{
+	int info[101];
+	info[1]=iutcb->values[1];
+	Sched_context::Ready_queue &rq = Sched_context::rq.cpu(Cpu_number(iutcb->values[2]));
+	rq.get_rqs(info);
+	int num_subjects=info[0];
+	outcb->values[0]=num_subjects;
+	//printf("Num subjects:%d\n",num_subjects);
+	for(int i=1; i<=2*num_subjects; i++)
+	{
+		//printf("%d\n",info[i]);
+		outcb->values[i]=info[i];
+	}
+	return commit_result(0, (2*info[0])+1);
+}
+
+PRIVATE
+L4_msg_tag
+Scheduler::sys_get_dead(L4_fpage::Rights, Syscall_frame *f, Utcb *outcb)
+{
+	long long unsigned info[101];
+	Sched_context::Ready_queue &rq = Sched_context::rq.current();
+	rq.get_dead(info);
+	long long unsigned num_subjects=info[0];
+	outcb->values[0]=num_subjects;
+	for(int i=1; i<=2*num_subjects; i++)
+	{
+		outcb->values[i]=info[i];
+	}
+	return commit_result(0, (2*info[0])+1);
 }
 
 PUBLIC inline
@@ -222,8 +316,11 @@ Scheduler::kinvoke(L4_obj_ref ref, L4_fpage::Rights rights, Syscall_frame *f,
   switch (iutcb->values[0])
     {
     case Info:       return Msg_sched_info::call(this, f->tag(), iutcb, outcb);
-    case Run_thread: return sys_run(rights, f, iutcb);
+    case Run_thread: return sys_run(rights, f, iutcb, outcb);
     case Idle_time:  return Msg_sched_idle::call(this, f->tag(), iutcb, outcb);
+    case Deploy_thread: return sys_deploy_thread(rights, f, iutcb);
+    case Get_rqs:    return sys_get_rqs(rights, f, iutcb, outcb);
+    case Get_dead:   return sys_get_dead(rights, f, outcb);
     default:         return commit_result(-L4_err::ENosys);
     }
 }
