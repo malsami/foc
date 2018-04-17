@@ -330,7 +330,7 @@ l4_scheduler_info_u(l4_cap_idx_t scheduler, l4_umword_t *cpu_max,
 
 L4_INLINE l4_msgtag_t
 l4_scheduler_run_thread_u(l4_cap_idx_t scheduler, l4_cap_idx_t thread,
-                          l4_sched_param_t const *sp, l4_utcb_t *utcb) L4_NOTHROW
+			  l4_sched_param_t const *sp, l4_utcb_t *utcb) L4_NOTHROW
 {
   l4_msg_regs_t *m = l4_utcb_mr_u(utcb);
   m->mr[0] = L4_SCHEDULER_RUN_THREAD_OP;
@@ -338,10 +338,13 @@ l4_scheduler_run_thread_u(l4_cap_idx_t scheduler, l4_cap_idx_t thread,
   m->mr[2] = sp->affinity.map;
   m->mr[3] = sp->prio;
   m->mr[4] = sp->quantum;
-  m->mr[5] = l4_map_obj_control(0, 0);
-  m->mr[6] = l4_obj_fpage(thread, 0, L4_FPAGE_RWX).raw;
+  m->mr[5] = sp->deadline; /* Own work */
+  m->mr[6] = l4_map_obj_control(0, 0);
+  m->mr[7] = l4_obj_fpage(thread, 0, L4_FPAGE_RWX).raw;
 
-  return l4_ipc_call(scheduler, utcb, l4_msgtag(L4_PROTO_SCHEDULER, 5, 1, 0), L4_IPC_NEVER);
+  // The second argument of the message tag (here: literal 6) denotes how many message registers to transfer
+  // The third argument of the message tag (here: literal 1) denotes which thread to schedule
+  return l4_ipc_call(scheduler, utcb, l4_msgtag(L4_PROTO_SCHEDULER, 6, 1, 0), L4_IPC_NEVER);
 }
 
 L4_INLINE l4_msgtag_t
