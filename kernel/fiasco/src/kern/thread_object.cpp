@@ -160,6 +160,11 @@ Thread_object::invoke(L4_obj_ref /*self*/, L4_fpage::Rights rights, Syscall_fram
     case Op_vcpu_control:
       f->tag(sys_vcpu_control(rights, f->tag(), utcb));
       return;
+    // START Modification for Checkpoint/Restore (rtcr)
+    case Op_ex_all_regs:
+      f->tag(sys_ex_all_regs(f->tag(), utcb));
+      return;
+    // END Modification for Checkpoint/Restore (rtcr)
     default:
       f->tag(invoke_arch(f->tag(), utcb));
       return;
@@ -607,6 +612,92 @@ Thread_object::sys_ex_regs(L4_msg_tag const &tag, Utcb *utcb)
   drq(handle_remote_ex_regs, &params, Drq::Any_ctxt);
   return params.result;
 }
+
+// START Modification for Checkpoint/Restore (rtcr)
+// -------------------------------------------------------------------
+// START Thread::ex_all_regs class system calls
+
+PUBLIC inline
+L4_msg_tag
+Thread_object::ex_all_regs(Utcb *utcb)
+{
+  Mword *r = utcb->values + 1;
+  Mword ops = utcb->values[0];
+
+  LOG_TRACE("Ex-regs", "exr", current(), Log_thread_exregs,
+      l->id = dbg_id();
+      l->ip = (Address) r[15]; l->sp = (Address) r[13]; l->op = ops;);
+
+  // Exchange general-purpose regs (r0 - r12)
+  for(unsigned int i = 0; i < 13; i++)
+  {
+    if(r[i] != ~0UL)
+      regs()->r[i] = r[i];
+    else
+      r[i] = regs()->r[i];
+  }
+
+  // Exchange SP
+  if (r[13] != ~0UL)
+    user_sp(r[13]);
+  else
+    r[13] = user_sp();
+
+  // Exchange LR
+  if(r[14] != ~0UL)
+    regs()->ulr = r[14];
+  else
+    r[14] = regs()->ulr;
+
+  // Exchange PC
+  if (r[15] != ~0UL)
+    user_ip(r[15]);
+  else
+    r[15] = user_ip();
+
+  // Exchange CSPR
+  if(r[16] != ~0UL)
+    regs()->psr = r[16];
+  else
+    r[16] = regs()->psr;
+
+  for(int i=0; i<17; i++)
+  {
+    printf("%lu\n",r[i]);
+  }
+
+  return commit_result(0, 18);
+}
+
+PRIVATE static
+Context::Drq::Result
+Thread_object::handle_remote_ex_all_regs(Drq *, Context *self, void *p)
+{
+  Remote_syscall *params = reinterpret_cast<Remote_syscall*>(p);
+  params->result = nonull_static_cast<Thread_object*>(self)->ex_all_regs(params->thread->utcb().access());
+  return params->result.proto() == 0 ? Drq::need_resched() : Drq::done();
+}
+
+PRIVATE inline NOEXPORT
+L4_msg_tag
+Thread_object::sys_ex_all_regs(L4_msg_tag const &tag, Utcb *utcb)
+{
+  if (tag.words() != 18)
+    return commit_result(-L4_err::EInval);
+
+  if (current() == this)
+    return ex_all_regs(utcb);
+
+  Remote_syscall params;
+  params.thread = current_thread();
+
+  drq(handle_remote_ex_all_regs, &params, Drq::Any_ctxt);
+  return params.result;
+}
+
+// END Thread::ex_all_regs class system calls
+// -------------------------------------------------------------------
+// END Modification for Checkpoint/Restore (rtcr)
 
 PRIVATE inline NOEXPORT NEEDS["timer.h"]
 L4_msg_tag
